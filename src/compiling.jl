@@ -113,6 +113,35 @@ function default_cpu_target()
     return readchomp(`$(Base.julia_cmd()) --startup-file=no --history-file=no -e "print(Sys.sysimage_target())"`)
 end
 
+# Multiversioning directives, which select how a MULTI-target image is cloned. `base(n)` indexes a
+# target by position, so it cannot survive a string reduced to one target.
+const MULTIVERSIONING_DIRECTIVES = ("clone_all", "-clone_all", "opt_size", "min_size")
+
+_is_multiversioning_directive(tok::AbstractString) =
+    tok in MULTIVERSIONING_DIRECTIVES || (startswith(tok, "base(") && endswith(tok, ")"))
+
+# Reduce a `-C`/`JULIA_CPU_TARGET` string to the single target the precompile step builds for: the
+# first `;`-separated target, carrying its `+feature`/`-feature` tokens and dropping only the
+# multiversioning directives.
+#
+# The features have to be carried. A package may branch at precompile time on
+# `JLOptions().cpu_target` to choose between forms of a function, and pkgimage target matching
+# accepts a SUBSET, so an image built with a feature missing is loaded unchanged by the
+# full-feature output process. Dropping a feature here therefore compiles that package for the
+# wrong target with no error and no warning.
+#
+# Splitting on `,` as well as `;` cannot preserve them: per Julia's target grammar the first
+# `,`-separated token of a target is its CPU name, so the first comma group holds no feature for
+# any input. `src/processor.cpp:match_sysimg_target` takes a first target the same way, on `;`.
+function first_cpu_target(cpu_target::AbstractString)
+    tokens = split(first(split(cpu_target, ';')), ',')
+    kept = String[String(first(tokens))]
+    for tok in Iterators.drop(tokens, 1)
+        _is_multiversioning_directive(tok) || push!(kept, String(tok))
+    end
+    return join(kept, ',')
+end
+
 function compile_products(recipe::ImageRecipe)
     # Only strip IR / metadata if not `--trim=no`
     strip_args = String[]
@@ -146,7 +175,7 @@ function compile_products(recipe::ImageRecipe)
     end
     julia_cmd = `$(build_julia_cmd(;cpu_target=recipe.cpu_target)) --startup-file=no --history-file=no`
     if recipe.cpu_target !== nothing
-        precompile_cpu_target = String(first(split(recipe.cpu_target, [';',','])))
+        precompile_cpu_target = first_cpu_target(recipe.cpu_target)
     else
         precompile_cpu_target = nothing
     end
